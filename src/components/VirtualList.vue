@@ -8,7 +8,11 @@
                 :key="row.item.id ?? row.index"
                 :ref="(el) => setItemRef(el, row.index)"
                 class="item"
-                :style="{ transform: `translateY(${row.top}px)` }"
+                :style="{
+                    transform: `translate3d(0, ${Math.round(row.top)}px, 0)`,
+                    minHeight: row.item && row.item.height ? row.item.height + 'px' : null,
+                    borderTop: row.index === 0 ? 'none' : '1px solid #e6e6e6'
+                }"
             >
                 {{ row.item.text }}
             </div>
@@ -17,7 +21,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, watch, nextTick, onBeforeUnmount } from 'vue'
 
 const emit = defineEmits(['mounted'])
 
@@ -129,23 +133,35 @@ const findIndexByOffset = (offsetTop) => {
     return Math.min(idx, n - 1)
 }
 
-const updateSize = (index, nextSize) => {
+const updateSizesBatch = (updates) => {
     const n = itemsLength.value
-    if (index < 0 || index >= n) {
+    if (!n || !updates.length) {
         return
     }
 
-    const prevSize = sizes.value[index]
-    const delta = nextSize - prevSize
-    if (Math.abs(delta) < 1) {
-        return
+    let changed = false
+    for (let k = 0; k < updates.length; k += 1) {
+        const { index, size } = updates[k]
+        if (index < 0 || index >= n) {
+            continue
+        }
+
+        const prevSize = sizes.value[index]
+        const delta = size - prevSize
+        if (Math.abs(delta) < 1) {
+            continue
+        }
+
+        sizes.value[index] = size
+        for (let i = index + 1; i <= n; i += i & -i) {
+            tree.value[i] += delta
+        }
+        changed = true
     }
 
-    sizes.value[index] = nextSize
-    for (let i = index + 1; i <= n; i += i & -i) {
-        tree.value[i] += delta
+    if (changed) {
+        treeVersion.value += 1
     }
-    treeVersion.value += 1
 }
 
 // 总高度
@@ -194,13 +210,14 @@ const visibleData = computed(() => {
 //     scrollTop.value = e.target.scrollTop
 // }
 let ticking = false
+let latestScrollTop = 0
 
 const onScroll = (e) => {
-    const top = e.target.scrollTop
+    latestScrollTop = e.target.scrollTop
 
     if (!ticking) {
         requestAnimationFrame(() => {
-            scrollTop.value = top
+            scrollTop.value = latestScrollTop
             ticking = false
         })
         ticking = true
@@ -217,17 +234,21 @@ const setItemRef = (el, index) => {
 }
 
 const measureVisibleHeights = () => {
+    const updates = []
+
     visibleData.value.forEach((row) => {
         const el = itemRefs.value[row.index]
         if (!el) {
             return
-    }
+        }
 
         const measured = el.offsetHeight
         if (measured > 0) {
-            updateSize(row.index, measured)
+            updates.push({ index: row.index, size: measured })
         }
     })
+
+    updateSizesBatch(updates)
 }
 
 let measureRaf = 0
@@ -287,6 +308,8 @@ const scrollToIndex = (index, align = 'start') => {
     scrollToOffset(nextTop)
 }
 
+let resizeObserver = null
+
 defineExpose({
     scrollToIndex,
     scrollToOffset
@@ -314,6 +337,29 @@ onMounted(() => {
     containerHeight.value = containerRef.value.clientHeight
     scheduleMeasure()
     emit('mounted', performance.now() - setupStartTime)
+
+    if (typeof ResizeObserver !== 'undefined' && containerRef.value) {
+        resizeObserver = new ResizeObserver((entries) => {
+            const entry = entries[0]
+            if (!entry) {
+                return
+            }
+            containerHeight.value = entry.contentRect.height
+        })
+        resizeObserver.observe(containerRef.value)
+    }
+})
+
+onBeforeUnmount(() => {
+    if (measureRaf) {
+        cancelAnimationFrame(measureRaf)
+        measureRaf = 0
+    }
+
+    if (resizeObserver) {
+        resizeObserver.disconnect()
+        resizeObserver = null
+    }
 })
 </script>
 
@@ -345,10 +391,10 @@ onMounted(() => {
     right: 0;
     min-height: 50px;
     line-height: 1.4;
-    border-bottom: 1px solid #eee;
     padding: 12px 10px;
     box-sizing: border-box;
     text-align: left;
     background: #fff;
+    will-change: transform;
 }
 </style>
